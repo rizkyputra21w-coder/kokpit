@@ -1,0 +1,415 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tank Battle Arcade</title>
+<style>
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: #101510; color: #e8f5dc;
+  font-family: monospace; text-align: center;
+  display: flex; flex-direction: column; align-items: center;
+  min-height: 100vh; padding: 12px;
+}
+h1 { color: #f4d35e; margin: 8px 0; letter-spacing: 3px; }
+.hud {
+  width: min(640px, 100%); display: flex;
+  justify-content: space-around; gap: 8px;
+  padding: 12px; background: #253323;
+  border: 2px solid #68814b; margin-bottom: 8px;
+}
+canvas {
+  width: min(640px, 100%); height: auto;
+  border: 3px solid #80975b; background: #253323;
+  image-rendering: pixelated; touch-action: none;
+}
+button {
+  font: bold 15px monospace; color: #fff;
+  background: #465e32; border: 2px solid #91ac66;
+  padding: 12px 18px; cursor: pointer; border-radius: 5px;
+}
+button:active { background: #839b49; }
+#start { margin: 12px; background: #a66b25; }
+.controls {
+  display: grid; grid-template-columns: repeat(3, 58px);
+  grid-template-rows: repeat(2, 48px); gap: 5px;
+  margin: 12px auto;
+}
+.controls button { padding: 4px; font-size: 22px; }
+.controls .up { grid-column: 2; grid-row: 1; }
+.controls .left { grid-column: 1; grid-row: 2; }
+.controls .down { grid-column: 2; grid-row: 2; }
+.controls .right { grid-column: 3; grid-row: 2; }
+.mobile { display: flex; gap: 18px; align-items: center; }
+small { color: #b8cba7; line-height: 1.7; }
+</style>
+</head>
+<body>
+<h1>⚔ TANK BATTLE ⚔</h1>
+<div class="hud">
+  <span>SKOR: <b id="score">0</b></span>
+  <span>NYAWA: <b id="lives">3</b></span>
+  <span>WAVE: <b id="wave">1</b></span>
+</div>
+
+<canvas id="game" width="640" height="480"></canvas>
+<button id="start">▶ MULAI GAME</button>
+
+<div class="mobile">
+  <div class="controls">
+    <button class="up" data-key="ArrowUp">▲</button>
+    <button class="left" data-key="ArrowLeft">◀</button>
+    <button class="down" data-key="ArrowDown">▼</button>
+    <button class="right" data-key="ArrowRight">▶</button>
+  </div>
+  <button id="fire">🔥 TEMBAK</button>
+</div>
+
+<small>
+  Gerak: WASD / tombol panah<br>
+  Tembak: SPACE / tombol TEMBAK<br>
+  Hancurkan tank merah dan hindari pelurunya!
+</small>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+const scoreEl = document.getElementById("score");
+const livesEl = document.getElementById("lives");
+const waveEl = document.getElementById("wave");
+
+const keys = {};
+let player, enemies, bullets, blocks, particles;
+let score = 0, lives = 3, wave = 1;
+let running = false, gameOver = false;
+let spawnTimer = 0, lastTime = 0;
+
+const obstacles = [
+  [100,80,80,24], [250,80,24,100], [430,80,100,24],
+  [100,190,24,90], [190,180,100,24], [370,180,100,24],
+  [510,190,24,90], [250,300,24,100], [370,300,24,100],
+  [90,380,100,24], [450,380,100,24]
+];
+
+function reset() {
+  score = 0; lives = 3; wave = 1;
+  bullets = []; particles = [];
+  blocks = obstacles.map(b => [...b]);
+  enemies = [];
+  player = {
+    x: 300, y: 420, angle: -Math.PI/2,
+    speed: 150, cooldown: 0, invincible: 2
+  };
+  spawnTimer = 0.5;
+  gameOver = false;
+  running = true;
+  updateHUD();
+}
+
+function updateHUD() {
+  scoreEl.textContent = score;
+  livesEl.textContent = lives;
+  waveEl.textContent = wave;
+}
+
+function rectHit(x,y,w,h,b) {
+  return x < b[0]+b[2] && x+w > b[0] &&
+         y < b[1]+b[3] && y+h > b[1];
+}
+
+function blocked(x,y,size=24) {
+  if (x < 4 || y < 4 || x+size > W-4 || y+size > H-4)
+    return true;
+  return blocks.some(b => rectHit(x,y,size,size,b));
+}
+
+function moveTank(t, dx, dy) {
+  if (dx) {
+    const nx = t.x + dx;
+    if (!blocked(nx,t.y)) t.x = nx;
+  }
+  if (dy) {
+    const ny = t.y + dy;
+    if (!blocked(t.x,ny)) t.y = ny;
+  }
+}
+
+function shoot(t, enemy=false) {
+  if (t.cooldown > 0) return;
+  t.cooldown = enemy ? 1.25 : 0.28;
+  const cx = t.x+12, cy = t.y+12;
+  bullets.push({
+    x: cx + Math.cos(t.angle)*17,
+    y: cy + Math.sin(t.angle)*17,
+    vx: Math.cos(t.angle)*(enemy ? 175 : 300),
+    vy: Math.sin(t.angle)*(enemy ? 175 : 300),
+    enemy, life: 2.2
+  });
+}
+
+function spawnEnemy() {
+  const spots = [
+    [20,20], [300,20], [590,20], [590,220], [20,220]
+  ];
+  const free = spots.filter(([x,y]) =>
+    !blocked(x,y) &&
+    Math.hypot(x-player.x,y-player.y) > 140 &&
+    !enemies.some(e => Math.hypot(x-e.x,y-e.y)<50)
+  );
+  if (!free.length) return;
+  const [x,y] = free[Math.floor(Math.random()*free.length)];
+  enemies.push({
+    x,y,angle:Math.PI/2,speed:48+wave*4,
+    cooldown:0.7+Math.random(),turn:0
+  });
+}
+
+function explode(x,y,color) {
+  for (let i=0;i<12;i++) {
+    const a=Math.random()*Math.PI*2;
+    const speed=35+Math.random()*130;
+    particles.push({
+      x,y,vx:Math.cos(a)*speed,vy:Math.sin(a)*speed,
+      life:0.25+Math.random()*0.5,color
+    });
+  }
+}
+
+function drawTank(t,color) {
+  ctx.save();
+  ctx.translate(t.x+12,t.y+12);
+  ctx.rotate(t.angle);
+  ctx.fillStyle="#101510";
+  ctx.fillRect(-12,-10,24,6);
+  ctx.fillRect(-12,4,24,6);
+  ctx.fillStyle=color;
+  ctx.fillRect(-9,-9,18,18);
+  ctx.fillStyle="#c7d9a3";
+  ctx.fillRect(-4,-5,8,10);
+  ctx.fillStyle="#151b12";
+  ctx.fillRect(0,-3,19,6);
+  ctx.restore();
+}
+
+function draw() {
+  ctx.fillStyle="#283b29";
+  ctx.fillRect(0,0,W,H);
+
+  // Pixel-style arena floor
+  ctx.fillStyle="#30442f";
+  for(let y=8;y<H;y+=32)
+    for(let x=8;x<W;x+=32)
+      if((x+y)%64===0) ctx.fillRect(x,y,16,16);
+
+  // Arena walls
+  ctx.fillStyle="#829268";
+  ctx.fillRect(0,0,W,5);
+  ctx.fillRect(0,H-5,W,5);
+  ctx.fillRect(0,0,5,H);
+  ctx.fillRect(W-5,0,5,H);
+
+  // Obstacles
+  blocks.forEach(b=>{
+    ctx.fillStyle="#6e7655";
+    ctx.fillRect(...b);
+    ctx.fillStyle="#a4a987";
+    ctx.fillRect(b[0],b[1],b[2],4);
+    ctx.fillStyle="#3c4933";
+    ctx.fillRect(b[0],b[1]+b[3]-4,b[2],4);
+  });
+
+  if(player && lives>0) {
+    if(player.invincible<=0 || Math.floor(performance.now()/100)%2===0)
+      drawTank(player,"#75d85b");
+  }
+
+  enemies.forEach(e=>drawTank(e,"#d94e45"));
+
+  bullets.forEach(b=>{
+    ctx.fillStyle=b.enemy?"#ff6b4a":"#ffe36e";
+    ctx.beginPath();
+    ctx.arc(b.x,b.y,4,0,Math.PI*2);
+    ctx.fill();
+  });
+
+  particles.forEach(p=>{
+    ctx.globalAlpha=Math.max(0,p.life*2);
+    ctx.fillStyle=p.color;
+    ctx.fillRect(p.x,p.y,4,4);
+    ctx.globalAlpha=1;
+  });
+
+  if(!running) {
+    ctx.fillStyle="rgba(0,0,0,0.76)";
+    ctx.fillRect(70,160,500,150);
+    ctx.textAlign="center";
+    ctx.fillStyle="#f4d35e";
+    ctx.font="bold 32px monospace";
+    ctx.fillText(gameOver?"GAME OVER":"TANK BATTLE",W/2,210);
+    ctx.fillStyle="#ffffff";
+    ctx.font="17px monospace";
+    ctx.fillText(gameOver?`Skor akhir: ${score}`:"Siap untuk bertempur?",W/2,245);
+    ctx.font="13px monospace";
+    ctx.fillText("Tekan MULAI GAME untuk bermain",W/2,278);
+  }
+}
+
+function update(dt) {
+  if(!running) return;
+
+  player.cooldown=Math.max(0,player.cooldown-dt);
+  player.invincible=Math.max(0,player.invincible-dt);
+
+  let dx=0,dy=0;
+  if(keys.ArrowLeft||keys.a) dx--;
+  if(keys.ArrowRight||keys.d) dx++;
+  if(keys.ArrowUp||keys.w) dy--;
+  if(keys.ArrowDown||keys.s) dy++;
+
+  if(dx||dy) {
+    const len=Math.hypot(dx,dy);
+    dx/=len; dy/=len;
+    player.angle=Math.atan2(dy,dx);
+    moveTank(player,dx*player.speed*dt,dy*player.speed*dt);
+  }
+  if(keys[" "]||keys.f) shoot(player);
+
+  spawnTimer-=dt;
+  if(spawnTimer<=0 && enemies.length<Math.min(3+wave,9)) {
+    spawnEnemy();
+    spawnTimer=Math.max(0.65,2-wave*0.1);
+  }
+
+  enemies.forEach(e=>{
+    e.cooldown-=dt;
+    e.turn-=dt;
+
+    // Aim at the player and periodically change direction
+    const targetAngle=Math.atan2(
+      player.y-e.y,player.x-e.x
+    );
+    const dist=Math.hypot(player.x-e.x,player.y-e.y);
+
+    if(e.turn<=0) {
+      e.turn=0.5+Math.random()*1.2;
+      e.angle=targetAngle+(Math.random()-0.5)*1.5;
+    }
+
+    if(dist>65) {
+      const vx=Math.cos(e.angle)*e.speed*dt;
+      const vy=Math.sin(e.angle)*e.speed*dt;
+      const oldX=e.x,oldY=e.y;
+      moveTank(e,vx,vy);
+      if(e.x===oldX && e.y===oldY) {
+        e.angle=targetAngle+(Math.random()-0.5)*2;
+        e.turn=0.25;
+      }
+    } else {
+      e.angle=targetAngle;
+    }
+
+    if(e.cooldown<=0 && dist<390) {
+      e.angle=targetAngle;
+      shoot(e,true);
+    }
+  });
+
+  bullets.forEach(b=>{
+    b.x+=b.vx*dt; b.y+=b.vy*dt; b.life-=dt;
+    if(blocks.some(w=>rectHit(b.x-3,b.y-3,6,6,w))) b.life=0;
+    if(b.x<5||b.x>W-5||b.y<5||b.y>H-5) b.life=0;
+
+    if(!b.enemy && b.life>0) {
+      enemies.forEach(e=>{
+        if(b.life>0 && b.x>e.x-3 && b.x<e.x+27 &&
+           b.y>e.y-3 && b.y<e.y+27) {
+          b.life=0;
+          explode(e.x+12,e.y+12,"#ff9d42");
+          e.dead=true;
+          score+=100;
+          updateHUD();
+        }
+      });
+    } else if(b.enemy && b.life>0 && player.invincible<=0 &&
+      b.x>player.x && b.x<player.x+24 &&
+      b.y>player.y && b.y<player.y+24) {
+      b.life=0;
+      lives--;
+      player.invincible=1.5;
+      explode(player.x+12,player.y+12,"#b8ff76");
+      updateHUD();
+      if(lives<=0) {
+        running=false;
+        gameOver=true;
+      }
+    }
+  });
+
+  enemies=enemies.filter(e=>!e.dead);
+  bullets=bullets.filter(b=>b.life>0);
+  particles.forEach(p=>{
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt;
+  });
+  particles=particles.filter(p=>p.life>0);
+
+  if(enemies.length===0 && spawnTimer<0.2) {
+    wave++;
+    updateHUD();
+    spawnTimer=1.5;
+  }
+}
+
+function loop(time) {
+  const dt=Math.min((time-lastTime)/1000||0,0.04);
+  lastTime=time;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener("keydown",e=>{
+  const k=e.key.length===1?e.key.toLowerCase():e.key;
+  keys[k]=true;
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key))
+    e.preventDefault();
+});
+window.addEventListener("keyup",e=>{
+  const k=e.key.length===1?e.key.toLowerCase():e.key;
+  keys[k]=false;
+});
+window.addEventListener("blur",()=>Object.keys(keys).forEach(k=>keys[k]=false));
+
+document.querySelectorAll("[data-key]").forEach(btn=>{
+  const key=btn.dataset.key;
+  const down=e=>{e.preventDefault();keys[key]=true;};
+  const up=e=>{e.preventDefault();keys[key]=false;};
+  btn.addEventListener("pointerdown",down);
+  btn.addEventListener("pointerup",up);
+  btn.addEventListener("pointerleave",up);
+  btn.addEventListener("pointercancel",up);
+});
+
+const fire=document.getElementById("fire");
+fire.addEventListener("pointerdown",e=>{
+  e.preventDefault();keys[" "]=true;
+});
+["pointerup","pointerleave","pointercancel"].forEach(ev=>
+  fire.addEventListener(ev,()=>keys[" "]=false)
+);
+
+document.getElementById("start").addEventListener("click",()=>{
+  reset();
+  document.getElementById("start").textContent="↻ ULANGI GAME";
+});
+
+reset();
+running=false;
+draw();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
